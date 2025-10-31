@@ -214,40 +214,53 @@ export function WalletMigration() {
     }
   }
 
-  const parseFilename = (filename: string) => {
-    // Pattern: timestamp-accounts count-network name-connected wallet address-accounts.json
-    // Network name can contain hyphens, so we match from account count until the wallet address (starts with 0x)
-    const match = filename.match(/^(\d{14})-(\d+)-(.+?)-(0x[0-9a-fA-F]+)-accounts\.json$/)
-    if (match) {
-      return {
-        timestamp: match[1],
-        accountCount: parseInt(match[2]),
-        network: match[3],
-        walletAddress: match[4]
-      }
-    }
-    return null
-  }
-
-  const generateFilename = (originalFilename: string, walletCount: number, newWalletAddress: string | null) => {
-    const parsed = parseFilename(originalFilename)
+  const generateFilename = (walletData: WalletData | WalletData[], walletCount: number, newWalletAddress: string | null, fileIndex: number = 0) => {
+    // Get network from wallet data (use first wallet if array)
+    const firstWallet = Array.isArray(walletData) ? walletData[0] : walletData
+    const network = firstWallet?.network || 'unknown'
+    
     // Generate timestamp in YYYYMMDDHHmmss format (14 digits)
+    // Add fileIndex to seconds to avoid conflicts when exporting multiple files
     const now = new Date()
     const year = now.getFullYear()
     const month = String(now.getMonth() + 1).padStart(2, '0')
     const day = String(now.getDate()).padStart(2, '0')
     const hours = String(now.getHours()).padStart(2, '0')
     const minutes = String(now.getMinutes()).padStart(2, '0')
-    const seconds = String(now.getSeconds()).padStart(2, '0')
+    const seconds = String(Math.min(59, now.getSeconds() + fileIndex)).padStart(2, '0')
     const timestamp = `${year}${month}${day}${hours}${minutes}${seconds}`
     
-    if (parsed && newWalletAddress) {
-      // Use network from original filename, new timestamp, wallet count, and new wallet address
-      return `${timestamp}-${walletCount}-${parsed.network}-${newWalletAddress.toLowerCase()}-accounts.json`
+    if (newWalletAddress) {
+      return `${timestamp}-${walletCount}-${network}-${newWalletAddress.toLowerCase()}-accounts.json`
     } else {
-      // Fallback if filename doesn't match pattern
-      const baseName = originalFilename.replace(/\.json$/, '')
-      return `${timestamp}-${walletCount}-${baseName}-${newWalletAddress?.toLowerCase() || 'migrated'}-accounts.json`
+      return `${timestamp}-${walletCount}-${network}-migrated-accounts.json`
+    }
+  }
+
+  const maskPrivateKey = (data: string): string => {
+    try {
+      const json = JSON.parse(data)
+      const maskKey = (obj: any): any => {
+        if (Array.isArray(obj)) {
+          return obj.map(item => maskKey(item))
+        } else if (obj && typeof obj === 'object') {
+          const masked: any = {}
+          for (const [key, value] of Object.entries(obj)) {
+            if (key === 'privateKey' || key === 'encryptedPrivateKey') {
+              masked[key] = '*'.repeat(64)
+            } else if (typeof value === 'object' && value !== null) {
+              masked[key] = maskKey(value)
+            } else {
+              masked[key] = value
+            }
+          }
+          return masked
+        }
+        return obj
+      }
+      return JSON.stringify(maskKey(json), null, 2)
+    } catch {
+      return data
     }
   }
 
@@ -294,8 +307,8 @@ export function WalletMigration() {
           const output = Array.isArray(fileData.data) ? migratedWallets : migratedWallets[0]
           const jsonOutput = JSON.stringify(output, null, 2)
           
-          // Generate new filename following the naming convention
-          const newFilename = generateFilename(fileData.file.name, migratedWallets.length, newWalletAddress)
+          // Generate new filename following the naming convention (use wallet data for network, not filename)
+          const newFilename = generateFilename(output, migratedWallets.length, newWalletAddress, migratedFilesData.length)
           
           migratedFilesData.push({
             filename: newFilename,
@@ -317,14 +330,15 @@ export function WalletMigration() {
     }
   }, [oldWalletSignature, newWalletSignature, walletFilesData, oldWalletAddress, newWalletAddress])
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     if (!migratedFiles.length) {
       alert('No migrated data to export')
       return
     }
 
-    // Export all files
-    migratedFiles.forEach((fileData) => {
+    // Export files one by one with 1 second interval to avoid filename conflicts
+    for (let i = 0; i < migratedFiles.length; i++) {
+      const fileData = migratedFiles[i]
       const blob = new Blob([fileData.data], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -334,7 +348,12 @@ export function WalletMigration() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-    })
+      
+      // Wait 1 second before exporting next file (except for the last one)
+      if (i < migratedFiles.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+    }
     
     alert(`Exported ${migratedFiles.length} file(s)!`)
   }, [migratedFiles])
@@ -469,7 +488,7 @@ export function WalletMigration() {
                 fontSize: '10px',
                 margin: '5px 0 0 0'
               }}>
-                {file.data.substring(0, 300)}...
+                {maskPrivateKey(file.data).substring(0, 500)}...
               </pre>
             </div>
           ))}
